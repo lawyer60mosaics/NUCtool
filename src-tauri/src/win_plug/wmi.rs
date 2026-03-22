@@ -14,11 +14,8 @@ use colored::Colorize;
 
 pub fn wmi_security() {
     unsafe {
-        CoInitializeEx(None, COINIT_MULTITHREADED)
-            .ok()
-            .context("Initializing COM")
-            .expect("Initializing Error");
-        match CoInitializeSecurity(
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let _ = CoInitializeSecurity(
             None,
             -1,
             None,
@@ -28,16 +25,8 @@ pub fn wmi_security() {
             None,
             EOAC_NONE,
             None,
-        ) {
-            Ok(_) => {}
-            Err(e) => {
-                println!("Error: {e}");
-            }
-        }
-        // .context("Initializing COM security")
-        // .expect("Initializing COM security Error");
+        );
     }
-    // println!("{}", "初始化 COM security".green());
 }
 
 pub fn wmi_init() -> (IWbemClassObject, IWbemServices, BSTR, BSTR) {
@@ -119,33 +108,36 @@ pub fn wmi_init() -> (IWbemClassObject, IWbemServices, BSTR, BSTR) {
 }
 
 pub fn wmi_set(in_cls: &IWbemClassObject, svc: &IWbemServices, obj_path: &BSTR, method_name: &BSTR, size: &str) -> i64 {
-    let in_params = unsafe {
-        in_cls
-            .SpawnInstance(0)
-            .context("Creating input params")
-            .unwrap()
+    let in_params = match unsafe { in_cls.SpawnInstance(0) } {
+        Ok(params) => params,
+        Err(e) => {
+            println!("创建输入参数失败: {:?}", e);
+            return -1;
+        }
     };
+
+    let data_value = match u64::from_str_radix(&size[2..], 16) {
+        Ok(val) => val,
+        Err(e) => {
+            println!("解析十六进制值失败 '{}': {:?}", size, e);
+            return -1;
+        }
+    };
+
     unsafe {
-        // in_params.Put(&BSTR::from("AssignDriveLetter"), 0, &VARIANT::from(true), 0).context("Setting AssignDriveLetter")?;
-        in_params
-            .Put(
-                &BSTR::from("Data"),
-                0,
-                &VARIANT::from(
-                    u64::from_str_radix(&size[2..], 16)
-                        .unwrap()
-                        .to_string()
-                        .as_str(),
-                ),
-                0,
-            )
-            .context("Setting Size")
-            .unwrap();
+        if let Err(e) = in_params.Put(
+            &BSTR::from("Data"),
+            0,
+            &VARIANT::from(data_value.to_string().as_str()),
+            0,
+        ) {
+            println!("设置Data参数失败: {:?}", e);
+            return -1;
+        }
     }
-    // Call the method and check the return value.
-    // println!("Calling method with {}", unsafe { in_params.GetObjectText(0).unwrap() });
+
     let mut out_params: Option<IWbemClassObject> = None;
-    unsafe {
+    if let Err(e) = unsafe {
         svc.ExecMethod(
             obj_path,
             method_name,
@@ -155,20 +147,36 @@ pub fn wmi_set(in_cls: &IWbemClassObject, svc: &IWbemServices, obj_path: &BSTR, 
             Some(&mut out_params),
             None,
         )
-        .context("Failed to call CreatePartition")
-        .unwrap();
+    } {
+        println!("执行WMI方法失败: {:?}", e);
+        return -1;
     }
-    let out_params = out_params
-        .ok_or_else(|| anyhow!("Missing output parameters"))
-        .unwrap();
+
+    let out_params = match out_params {
+        Some(params) => params,
+        None => {
+            println!("未收到输出参数");
+            return -1;
+        }
+    };
+
     let mut return_value = VARIANT::new();
-    unsafe {
-        out_params
-            .Get(w!("Return"), 0, &mut return_value, None, None)
-            .unwrap();
+    if let Err(e) = unsafe {
+        out_params.Get(w!("Return"), 0, &mut return_value, None, None)
+    } {
+        println!("获取返回值失败: {:?}", e);
+        return -1;
     }
-    // println!("Return value = {return_value}.");
-    return_value.to_string().parse::<i64>().unwrap()
+
+    // 修复问题13：解析失败时打印原始值和错误，而非静默 unwrap_or(-1)
+    let raw = return_value.to_string();
+    match raw.parse::<i64>() {
+        Ok(v) => v,
+        Err(e) => {
+            println!("WMI 返回值解析失败 原始值='{}': {:?}", raw, e);
+            -1
+        }
+    }
 }
 
 pub fn get_model() -> i64 {

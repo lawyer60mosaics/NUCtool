@@ -40,10 +40,13 @@ pub static W_FAN_AC71H_TURBO: &str = "0x0000000000400751";
 pub static W_FAN_KC71F_TURBO: &str = "0x0000000000500751";
 pub static W_FAN_RESET: &str = "0x0000000000A00751";
 pub static R_AC_LED_COLOR: &str = "0x00000100000007EA";
+#[allow(dead_code)]
 pub static R_DC_LED_COLOR: &str = "0x00000100000007EB";
 pub static W_AC_LED_COLOR_Y: &str = "0x00000000002A07EA";
 pub static W_AC_LED_COLOR_N: &str = "0x00000000000A07EA";
+#[allow(dead_code)]
 pub static W_DC_LED_COLOR_Y: &str = "0x00000000002A07EB";
+#[allow(dead_code)]
 pub static W_DC_LED_COLOR_N: &str = "0x00000000000A07EB";
 // RGB: i64 = 标准RGB值 / 51 * 10
 #[cfg(windows)]
@@ -62,6 +65,11 @@ lazy_static! {
 #[cfg(unix)]
 lazy_static! {
     pub static ref DRIVER_PATH: PathBuf = find_hwmon_with_name();
+}
+
+// 全局硬件写入互斥锁，防止并发写入 WMI/sysfs 导致的不稳定或错误
+lazy_static! {
+    pub static ref HW_ACCESS_LOCK: Mutex<()> = Mutex::new(());
 }
 
 #[derive(Serialize, Deserialize)]
@@ -131,7 +139,8 @@ impl ApiFan {
         }
     }
     pub fn get_cpu_temp(&self) -> i64 {
-        wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, R_TEMP_L)
+        // 与 GPU 保持一致，取低 8 位才是摄氏度温度值，避免高位脏数据触发过温保护
+        wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, R_TEMP_L) & 0xFF
     }
     pub fn get_gpu_temp(&self) -> i64 {
         wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, R_TEMP_R) & 0xFF
@@ -145,8 +154,15 @@ impl ApiFan {
             wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, &self.r_fan_r2)
     }
     fn _set_fan(&self, l: i64, r: i64) {
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, format!("0x000000000{:02x}1809", l).as_str());
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, format!("0x000000000{:02x}1804", r).as_str());
+        // 序列化写入，防止并发导致的 WMI 错误
+        let _guard = HW_ACCESS_LOCK.lock().unwrap();
+        // l/r 范围 0-200，用 {:02X} 保证2位十六进制（00-C8），超出时 clamp 保护
+        let l = l.clamp(0, 200);
+        let r = r.clamp(0, 200);
+        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name,
+            format!("0x0000000000{:02X}1809", l).as_str());
+        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name,
+            format!("0x0000000000{:02X}1804", r).as_str());
     }
     /// MAX speed 200
     pub fn set_fan(&self, l: i64, r: i64) -> bool {
@@ -154,10 +170,12 @@ impl ApiFan {
         true
     }
     pub fn set_fan_auto(&self) -> bool {
+        let _guard = HW_ACCESS_LOCK.lock().unwrap();
         let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, W_FAN_RESET);
         true
     }
     pub fn set_fan_control(&self) -> bool {
+        let _guard = HW_ACCESS_LOCK.lock().unwrap();
         if *MODEL_ID == 1 {
             wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, W_FAN_AC71H_TURBO);
         } else {
@@ -173,11 +191,18 @@ impl ApiFan {
         if out == 27664 || out == 27648 { 2 } else { 1 }
     }
     pub fn get_fan_speeds(&self) -> FanSpeeds {
+        let left_fan  = self.get_fan_l();
+        let right_fan = self.get_fan_r();
+        let left_temp  = self.get_cpu_temp();
+        let right_temp = self.get_gpu_temp();
+
+        // 超出合理范围的读数视为硬件异常，归零以避免前端显示乱码
+        // 转速上限 7000 RPM，温度上限 105°C
         FanSpeeds {
-            left_fan_speed: self.get_fan_l(),
-            right_fan_speed: self.get_fan_r(),
-            left_temp: self.get_cpu_temp(),
-            right_temp: self.get_gpu_temp()
+            left_fan_speed:  if (0..=7000).contains(&left_fan)  { left_fan  } else { 0 },
+            right_fan_speed: if (0..=7000).contains(&right_fan) { right_fan } else { 0 },
+            left_temp:       if (1..=105).contains(&left_temp)  { left_temp  } else { 0 },
+            right_temp:      if (1..=105).contains(&right_temp) { right_temp } else { 0 },
         }
     }
     /// (gpu1, gpu2, cpu1, cpu2, tcc)
@@ -191,30 +216,42 @@ impl ApiFan {
         )
     }
     pub fn set_tdp(&self, t: TDP) -> bool {
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, format!("0x000000000{:02x}0783", t.cpu1).as_str());
+        let _guard = HW_ACCESS_LOCK.lock().unwrap();
+        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name,
+            format!("0x0000000000{:02X}0783", t.cpu1).as_str());
         thread::sleep(Duration::from_secs_f64(0.5));
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, format!("0x000000000{:02x}0784", t.cpu2).as_str());
+        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name,
+            format!("0x0000000000{:02X}0784", t.cpu2).as_str());
         thread::sleep(Duration::from_secs_f64(0.5));
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, format!("0x000000000{:02x}072d", t.gpu1).as_str());
+        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name,
+            format!("0x0000000000{:02X}072d", t.gpu1).as_str());
         thread::sleep(Duration::from_secs_f64(0.5));
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, format!("0x000000000{:02x}072e", t.gpu2).as_str());
+        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name,
+            format!("0x0000000000{:02X}072e", t.gpu2).as_str());
         thread::sleep(Duration::from_secs_f64(0.5));
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, format!("0x000000000{:02x}0786", t.tcc).as_str());
+        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name,
+            format!("0x0000000000{:02X}0786", t.tcc).as_str());
         true
     }
     pub fn set_ac_led_color_y(&self) -> bool {
+        let _guard = HW_ACCESS_LOCK.lock().unwrap();
         let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, W_AC_LED_COLOR_Y);
         true
     }
     pub fn set_ac_led_color_n(&self) -> bool {
+        let _guard = HW_ACCESS_LOCK.lock().unwrap();
         let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, W_AC_LED_COLOR_N);
         true
     }
+    #[allow(dead_code)]
     pub fn set_dc_led_color_y(&self) -> bool {
+        let _guard = HW_ACCESS_LOCK.lock().unwrap();
         let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, W_DC_LED_COLOR_Y);
         true
     }
+    #[allow(dead_code)]
     pub fn set_dc_led_color_n(&self) -> bool {
+        let _guard = HW_ACCESS_LOCK.lock().unwrap();
         let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, W_DC_LED_COLOR_N);
         true
     }
@@ -232,6 +269,7 @@ impl ApiFan {
             },
         }
     }
+    #[allow(dead_code)]
     pub fn get_dc_led_color(&self) -> i64 {
         let out =wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, R_DC_LED_COLOR); 
         match out {
@@ -292,9 +330,11 @@ impl ApiFan {
         get_sys(&self.r_fan_r)
     }
     pub fn set_fan_l(&self, n: i64) -> bool {
+        let _guard = HW_ACCESS_LOCK.lock().unwrap();
         set_sys(&self.w_fan_l, n)
     }
     pub fn set_fan_r(&self, n: i64) -> bool {
+        let _guard = HW_ACCESS_LOCK.lock().unwrap();
         set_sys(&self.w_fan_r, n)
     }
     /// MAX speed 255
@@ -302,20 +342,27 @@ impl ApiFan {
         self.set_fan_l(l) && self.set_fan_r(r)
     }
     pub fn set_fan_auto(&self) -> bool {
+        let _guard = HW_ACCESS_LOCK.lock().unwrap();
         set_sys(&self.mode, 2)
     }
     pub fn set_fan_control(&self) -> bool {
+        let _guard = HW_ACCESS_LOCK.lock().unwrap();
         set_sys(&self.mode, 1)
     }
     pub fn get_fan_mode(&self) -> i64 {
         get_sys(&self.mode)
     }
     pub fn get_fan_speeds(&self) -> FanSpeeds {
+        let left_fan  = self.get_fan_l();
+        let right_fan = self.get_fan_r();
+        let left_temp  = self.get_cpu_temp();
+        let right_temp = self.get_gpu_temp();
+
         FanSpeeds {
-            left_fan_speed: self.get_fan_l(),
-            right_fan_speed: self.get_fan_r(),
-            left_temp: self.get_cpu_temp(),
-            right_temp: self.get_gpu_temp()
+            left_fan_speed:  if (0..=7000).contains(&left_fan)  { left_fan  } else { 0 },
+            right_fan_speed: if (0..=7000).contains(&right_fan) { right_fan } else { 0 },
+            left_temp:       if (1..=105).contains(&left_temp)  { left_temp  } else { 0 },
+            right_temp:      if (1..=105).contains(&right_temp) { right_temp } else { 0 },
         }
     }
     pub fn get_tdp(&self) -> (i64, i64, i64, i64, i64) {
@@ -328,6 +375,7 @@ impl ApiFan {
         )
     }
     pub fn set_tdp(&self, t: TDP) -> bool {
+        let _guard = HW_ACCESS_LOCK.lock().unwrap();
         set_sys(&self.cpu_pl1, t.cpu1 * 1000)
             && set_sys(&self.cpu_pl2, t.cpu2 * 1000)
             && set_sys(&self.gpu_pl1, t.gpu1 * 1000)

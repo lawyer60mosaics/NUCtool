@@ -29,17 +29,29 @@ async function get() {
 }
 
 b.addEventListener('click', async () => {
-    const t = {
-        cpu1: parseInt(cpu1.value),
-        cpu2: parseInt(cpu2.value),
-        gpu1: parseInt(gpu1.value),
-        gpu2: parseInt(gpu2.value),
-        tcc: parseInt(tcc.value)
-    };
-    console.log(t);
-    window.__TAURI__.core.invoke('set_tdp', {t});
-    // location.reload();
-    get();
+    try {
+        const t = {
+            cpu1: parseInt(cpu1.value) || 0,
+            cpu2: parseInt(cpu2.value) || 0,
+            gpu1: parseInt(gpu1.value) || 0,
+            gpu2: parseInt(gpu2.value) || 0,
+            tcc: parseInt(tcc.value) || 0
+        };
+        
+        // 输入验证
+        if (t.cpu1 < 0 || t.cpu2 < 0 || t.gpu1 < 0 || t.gpu2 < 0) {
+            alert('TDP值不能为负数');
+            return;
+        }
+        
+        console.log('设置TDP:', t);
+        await window.__TAURI__.core.invoke('set_tdp', {t});
+        console.log('TDP设置成功');
+        await get(); // 重新获取确认
+    } catch (error) {
+        console.error('设置TDP失败:', error);
+        alert('设置TDP失败: ' + error);
+    }
 });
 a.addEventListener('click', async () => {
     get();

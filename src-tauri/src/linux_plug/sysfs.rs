@@ -53,23 +53,38 @@ pub fn get_model_id() -> i64 {
 pub fn get_kernel_version() -> i64 {
     let output = Command::new("uname")
         .arg("-r")
-        .output()
-        .expect("Failed to execute command");
-    if output.status.success() {
-        let kernel_version = String::from_utf8_lossy(&output.stdout);
-        let kernel_version = kernel_version.rsplit("-").last().unwrap().split(".").collect::<Vec<&str>>();
-        println!("Linux Kernel Version: {:?}", kernel_version);
-        return if kernel_version[0].parse::<i64>().unwrap() == 6 {
-            match kernel_version[1] {
-                "13" => 4,
-                "12" => 3,
-                "11" => 2,
-                "10" => 1,
-                _ => 0
+        .output();
+    
+    match output {
+        Ok(output) if output.status.success() => {
+            let kernel_version = String::from_utf8_lossy(&output.stdout);
+            let parts: Vec<&str> = kernel_version.trim().split('-').collect();
+            
+            if let Some(last_part) = parts.last() {
+                let version_parts: Vec<&str> = last_part.split('.').collect();
+                println!("Linux Kernel Version: {:?}", version_parts);
+                
+                if let Some(&major) = version_parts.first() {
+                    if let Ok(major_num) = major.parse::<i64>() {
+                        if major_num == 6 {
+                            return if let Some(&minor) = version_parts.get(1) {
+                                match minor {
+                                    "13" => 4,
+                                    "12" => 3,
+                                    "11" => 2,
+                                    "10" => 1,
+                                    _ => 0
+                                }
+                            } else {
+                                0
+                            };
+                        }
+                    }
+                }
             }
-        } else {
-            0
         }
+        Ok(_) => eprintln!("uname command failed"),
+        Err(e) => eprintln!("Failed to execute uname: {}", e)
     }
     0
 }
@@ -77,10 +92,31 @@ pub fn get_kernel_version() -> i64 {
 pub fn sys_init() {
     if Uid::current().is_root() {
         println!("{}", "当前以 root 用户身份运行".red());
-        return;
     } else {
-        println!("{}", "当前以普通用户身份运行".red());
-        return;
+        println!("{}", "当前以普通用户身份运行（sysfs 写入可能失败）".red());
+    }
+
+    // 修复问题12：提前检查 hwmon/uniwill 驱动是否存在
+    // 避免后续 lazy_static DRIVER_PATH 初始化时因找不到设备而直接 panic
+    let hwmon_dir = "/sys/class/hwmon";
+    let mut found = false;
+    if let Ok(entries) = std::fs::read_dir(hwmon_dir) {
+        for entry in entries.flatten() {
+            let name_path = entry.path().join("name");
+            if let Ok(content) = std::fs::read_to_string(&name_path) {
+                if content.trim() == "uniwill" {
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    if found {
+        println!("{}", "✅ 检测到 uniwill hwmon 驱动，硬件接口就绪".green());
+    } else {
+        eprintln!("{}", "❌ 未检测到 uniwill hwmon 驱动，风扇控制将无法工作！");
+        eprintln!("   请手动加载驱动：sudo modprobe uniwill-laptop");
+        eprintln!("   或确认内核模块路径后执行：sudo insmod /path/to/uniwill-laptop.ko");
     }
     /*
     if *KERNEL_ID == 0 {

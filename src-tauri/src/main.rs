@@ -8,6 +8,7 @@ use std::{
     sync::{Arc, Mutex}
 };
 use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_autostart::ManagerExt;
 
 #[cfg(windows)]
 mod win_plug;
@@ -37,7 +38,10 @@ use linux_plug::{
 fn main() {
     #[cfg(debug_assertions)]
     let devtools = tauri_plugin_devtools::init();
+    #[cfg(debug_assertions)]
     let mut builder = tauri::Builder::default();
+    #[cfg(not(debug_assertions))]
+    let builder = tauri::Builder::default();
     #[cfg(debug_assertions)]
     {
         builder = builder.plugin(devtools);
@@ -75,7 +79,9 @@ fn main() {
             get_rgb,
             set_rgb_color_y,
             set_rgb_color_n,
-            get_rgb_color
+            get_rgb_color,
+            autostart_status,
+            autostart_set
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -85,4 +91,18 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .unwrap();
+}
+
+#[tauri::command]
+fn autostart_status(app: tauri::AppHandle) -> Result<bool, String> {
+    let mgr = app.autolaunch();
+    mgr.is_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn autostart_set(app: tauri::AppHandle, enable: bool) -> Result<bool, String> {
+    let mgr = app.autolaunch();
+    let res = if enable { mgr.enable() } else { mgr.disable() };
+    res.map_err(|e| e.to_string())?;
+    mgr.is_enabled().map_err(|e| e.to_string())
 }
