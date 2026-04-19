@@ -107,7 +107,7 @@ pub fn init(app: &mut App) -> Result<(), Box<dyn Error>> {
     let q = MenuItemBuilder::with_id("q", "退出程序").build(app)?;
     let d = MenuItemBuilder::with_id("d", "调试模式").build(app)?;
     let menu = MenuBuilder::new(app).items(&[&h, &d, &q]).build()?;
-    let _tray = TrayIconBuilder::new()
+    let _tray = TrayIconBuilder::with_id("main_tray")
         .menu(&menu)
         .show_menu_on_left_click(false)
         // .title("NUCtool")

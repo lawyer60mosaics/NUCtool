@@ -20,8 +20,15 @@ mod tests;
 use plug::{
     setup,
     struct_set::FanControlState,
-    config::{save_fan_config, load_fan_config},
-    fan::{fan_reset, get_fan_speeds, start_fan_control, stop_fan_control},
+    config::{
+        export_monitor_log_csv,
+        list_fan_profiles,
+        load_fan_config,
+        load_fan_profile,
+        save_fan_config,
+        save_fan_profile,
+    },
+    fan::{fan_reset, get_current_fan_mode, get_fan_speeds, start_fan_control, stop_fan_control},
     tdp::{get_tdp, set_tdp, set_rgb, get_rgb, set_rgb_color_y, set_rgb_color_n, get_rgb_color},
 };
 
@@ -57,6 +64,7 @@ fn main() {
     sys_init();
     let fan_control_state = FanControlState {
         is_running: Arc::new(Mutex::new(false)),
+        active_mode: Arc::new(Mutex::new("office".to_string())),
     };
     builder
         .plugin(tauri_plugin_dialog::init())
@@ -70,8 +78,13 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             start_fan_control,
             stop_fan_control,
+            get_current_fan_mode,
             save_fan_config,
             load_fan_config,
+            save_fan_profile,
+            load_fan_profile,
+            list_fan_profiles,
+            export_monitor_log_csv,
             get_fan_speeds,
             get_tdp,
             set_tdp,

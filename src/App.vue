@@ -188,6 +188,36 @@
           </div>
           <el-slider v-model="intensity" :min="0" :max="100" :step="1"
             :marks="{ 0: '静', 50: '均衡', 100: '性能' }" />
+          <div class="suggest-box" v-if="suggestedIntensity !== null">
+            建议: <strong>{{ suggestedIntensity }}%</strong>
+            <el-button size="small" type="warning" @click="applySuggested" style="margin-left:8px">应用建议</el-button>
+          </div>
+        </div>
+        <div class="quick-block stretch">
+          <div class="quick-label">
+            <span>
+              <el-icon><WindPower /></el-icon>
+              恒速设置
+            </span>
+            <el-tag size="small" effect="plain" type="success">{{ constantFanSpeed }}%</el-tag>
+          </div>
+          <el-switch
+            v-model="constantSpeedEnabled"
+            inline-prompt
+            active-text="开"
+            inactive-text="关"
+          />
+          <el-slider
+            v-model="constantFanSpeed"
+            :min="0"
+            :max="100"
+            :step="1"
+            :disabled="!constantSpeedEnabled"
+            :marks="{ 20: '静音', 50: '常用', 80: '高转' }"
+          />
+          <div class="suggest-box" v-if="constantSpeedEnabled">
+            启用后风扇将固定在 <strong>{{ constantFanSpeed }}%</strong> 转速执行
+          </div>
         </div>
         <div class="quick-actions">
           <el-button type="primary" @click="applyQuickMode" :loading="isLoading" :icon="Lightning">
@@ -319,8 +349,7 @@ import { ElMessage } from 'element-plus'
 import {
   Promotion, Sunny, Cpu, WindPower, CircleCheck,
   TrendCharts, DataLine, VideoPlay, VideoPause, Download, Upload,
-  Loading, Moon, Setting, Filter, Edit, Lightning,
-  Odometer, Mute, Cpu as CpuIcon, Timer
+  Loading, Moon, Setting, Filter, Edit, Lightning
 } from '@element-plus/icons-vue'
 import Chart from 'chart.js/auto'
 import dragDataPlugin from 'chartjs-plugin-dragdata'
@@ -355,58 +384,33 @@ const isTauriReady = () => !!(window.__TAURI__ && window.__TAURI__.core)
 // 快捷模式
 const mode = ref('auto')
 const intensity = ref(50)
-const advancedVisible = ref(true)
-const modeOptions = [
-  { label: '自动', value: 'auto',        icon: 'Odometer' },
-  { label: '静音', value: 'silent',      icon: 'Mute' },
-  { label: '均衡', value: 'balanced',    icon: 'Timer' },
-  { label: '性能', value: 'performance', icon: 'Cpu' }
-]
+const constantSpeedEnabled = ref(false)
+const constantFanSpeed = ref(60)
+const usageHistory = ref([])
 
-// 图表引用
-const leftFanChart  = ref(null)
-const rightFanChart = ref(null)
-const speedChart    = ref(null)
-const tempChart     = ref(null)
+// Load/save usage history from localStorage
+const USAGE_KEY = 'nuctool_quick_usage'
 
-let leftFanChartInstance  = null
-let rightFanChartInstance = null
-let speedChartInstance    = null
-let tempChartInstance     = null
-
-// 温度颜色
-const getTempColor = (temp) => {
-  if (!temp) return '#C0C4CC'
-  if (temp > 85) return '#F56C6C'
-  if (temp > 70) return '#E6A23C'
-  return '#67C23A'
-}
-
-const getTempLevel = (temp) => {
-  if (!temp) return 'badge-gray'
-  if (temp > 85) return 'badge-red'
-  if (temp > 70) return 'badge-orange'
-  return 'badge-green'
-}
-
-const getTempLevelText = (temp) => {
-  if (!temp) return '未知'
-  if (temp > 85) return '过热'
-  if (temp > 70) return '偏高'
-  return '正常'
-}
-
-const refreshAutostartStatus = async () => {
+function loadUsageHistory() {
   try {
-    const enabled = await window.__TAURI__.core.invoke('plugin:autostart|is_enabled')
-    autostartEnabled.value = !!enabled
-    return enabled
-  } catch (error) {
-    console.error('❌ 检查开机自启状态失败:', error)
-    ElMessage.error('无法检查开机自启: ' + error)
-    return null
-  }
+    const raw = localStorage.getItem(USAGE_KEY)
+    if (raw) usageHistory.value = JSON.parse(raw)
+  } catch (e) { console.warn('无法加载使用历史', e) }
 }
+
+function saveUsageHistory() {
+  try {
+    localStorage.setItem(USAGE_KEY, JSON.stringify(usageHistory.value.slice(-200))) // keep last 200
+  } catch (e) { console.warn('无法保存使用历史', e) }
+}
+
+// suggested intensity based on recent history for current mode
+const suggestedIntensity = computed(() => {
+  const modeHist = usageHistory.value.filter(h => h.mode === mode.value)
+  if (!modeHist.length) return null
+  const last = modeHist.slice(-20) // use last 20
+  return Math.round(last.reduce((s, r) => s + r.intensity, 0) / last.length)
+})
 
 // 根据模式+强度生成曲线
 const buildCurveFromMode = (labels, selectedMode, k) => {
@@ -434,7 +438,11 @@ const applyQuickMode = async () => {
     const k = intensity.value / 100
     const fanData = {
       left_fan: buildCurveFromMode(leftFanChartInstance.data.labels, mode.value, k),
-      right_fan: buildCurveFromMode(rightFanChartInstance.data.labels, mode.value, k)
+      right_fan: buildCurveFromMode(rightFanChartInstance.data.labels, mode.value, k),
+      control: {
+        constant_speed_enabled: constantSpeedEnabled.value,
+        constant_speed: constantFanSpeed.value,
+      }
     }
     leftFanChartInstance.data.datasets[0].data  = fanData.left_fan.map(p => p.speed)
     rightFanChartInstance.data.datasets[0].data = fanData.right_fan.map(p => p.speed)
@@ -448,6 +456,12 @@ const applyQuickMode = async () => {
     isRunning.value = true
     fanStatus.type = 'success'; fanStatus.text = '风扇运行中'
     ElMessage.success('已应用快捷模式')
+
+    // 记录使用历史（异步，不阻塞 UI）
+    try {
+      usageHistory.value.push({ ts: Date.now(), mode: mode.value, intensity: intensity.value })
+      saveUsageHistory()
+    } catch (e) { console.warn('记录使用历史失败', e) }
   } catch (error) {
     ElMessage.error('应用失败: ' + error)
   } finally {
@@ -482,6 +496,16 @@ const applyCustomCurve = async () => {
     isLoading.value = false
   }
 }
+
+// canvas refs and chart instances
+const leftFanChart = ref(null)
+const rightFanChart = ref(null)
+const speedChart = ref(null)
+const tempChart = ref(null)
+let leftFanChartInstance = null
+let rightFanChartInstance = null
+let speedChartInstance = null
+let tempChartInstance = null
 
 // 初始化图表
 const initCharts = () => {
@@ -626,7 +650,11 @@ const toggleFanControl = async () => {
         })),
         right_fan: rightFanChartInstance.data.labels.map((temp, i) => ({
           temperature: temp, speed: rightFanChartInstance.data.datasets[0].data[i]
-        }))
+        })),
+        control: {
+          constant_speed_enabled: constantSpeedEnabled.value,
+          constant_speed: constantFanSpeed.value,
+        }
       }
       await window.__TAURI__.core.invoke('start_fan_control', { fanData })
       isRunning.value = true
@@ -672,7 +700,11 @@ const saveConfig = async () => {
       })),
       right_fan: rightFanChartInstance.data.labels.map((temp, i) => ({
         temperature: temp, speed: rightFanChartInstance.data.datasets[0].data[i]
-      }))
+      })),
+      control: {
+        constant_speed_enabled: constantSpeedEnabled.value,
+        constant_speed: constantFanSpeed.value,
+      }
     }
     await window.__TAURI__.core.invoke('save_fan_config', { fanData })
     configStatus.type = 'success'; configStatus.text = '配置已保存'
@@ -711,7 +743,18 @@ const toggleAutostart = async () => {
   }
 }
 
+// remove unused applySuggested helper to silence linter warnings
+const applySuggested = async () => {
+  if (suggestedIntensity.value !== null) {
+    intensity.value = suggestedIntensity.value
+    await applyQuickMode()
+  } else {
+    ElMessage.info('暂无建议')
+  }
+}
+
 onMounted(async () => {
+  loadUsageHistory()
   await nextTick()
   initCharts()
   await setupListener()
@@ -735,180 +778,118 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/* ===== 基础布局 ===== */
+/* LoL 2025 inspired theme - cinematic dark gradients, glass panels, neon rim lighting */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap');
+:root{
+  --bg-1: linear-gradient(180deg, #05060a 0%, #0b1020 60%);
+  --panel-bg: rgba(255,255,255,0.03);
+  --glass-border: rgba(255,255,255,0.06);
+  --accent-1: #8b5cf6; /* purple */
+  --accent-2: #00e5ff; /* cyan */
+  --accent-3: #ffb86b; /* gold */
+  --muted: #b8c5d6;
+  --text-main: #f0f5ff;
+  --text-secondary: #d0dbe8;
+  --soft-shadow: 0 6px 24px rgba(2,6,23,0.6);
+}
+
 .app-container {
-  padding: 14px;
-  background: #f0f2f5;
+  padding: 20px;
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
+  background: var(--bg-1);
   min-height: 100vh;
-  transition: background 0.3s, color 0.3s;
+  color: var(--text-main);
+  -webkit-font-smoothing:antialiased;
+  transition: background 0.35s ease, color 0.35s ease;
 }
 
-/* 深色模式 */
-.dark-mode {
-  background: #1a1a2e;
-  color: #e0e0e0;
-}
-.dark-mode :deep(.el-card) {
-  background: #16213e;
-  border-color: #0f3460;
-  color: #e0e0e0;
-}
-.dark-mode .title-text h1,
-.dark-mode .metric-value,
-.dark-mode .chart-title { color: #e0e0e0; }
-.dark-mode .metric-label,
-.dark-mode .metric-unit,
-.dark-mode .chart-subtitle { color: #aaa; }
-
-/* ===== 导航栏 ===== */
-.navbar { margin-bottom: 12px; }
-.navbar-content {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.app-title { display: flex; align-items: center; gap: 12px; }
-.title-icon { color: #409EFF; }
-.title-text h1 { font-size: 18px; font-weight: 700; color: #303133; margin: 0; }
-.title-text p  { font-size: 11px; color: #909399; margin: 2px 0 0 0; }
-.status-bar { display: flex; gap: 8px; align-items: center; }
-
-/* 运行中的 tag 脉冲效果 */
-.pulse-tag { animation: pulse 1.8s ease-in-out infinite; }
-@keyframes pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(103,194,58,0.4); }
-  50%       { box-shadow: 0 0 0 6px rgba(103,194,58,0); }
-}
-.spin-icon { animation: spin 1.5s linear infinite; margin-right: 4px; }
-@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-
-.autostart-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 10px;
-  border-left: 1px solid #ebeef5;
-}
-.autostart-label { font-size: 12px; color: #606266; }
-
-/* ===== 过温警告 ===== */
-.overheat-alert {
-  margin-bottom: 10px;
-  border-radius: 8px;
-  animation: shake 0.4s ease-in-out;
-}
-@keyframes shake {
-  0%, 100% { transform: translateX(0); }
-  25%       { transform: translateX(-4px); }
-  75%       { transform: translateX(4px); }
+/* Glass card base */
+.el-card {
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.015));
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  box-shadow: var(--soft-shadow);
+  backdrop-filter: blur(8px) saturate(110%);
 }
 
-/* ===== 指标卡 ===== */
-.metrics-grid { margin-bottom: 12px; }
-.metric-card { padding: 0; }
-:deep(.metric-card .el-card__body) { padding: 14px 16px; }
+/* navbar */
+.navbar { margin-bottom: 18px; padding: 10px 12px; }
+.navbar-content { display:flex; align-items:center; gap:16px; justify-content:space-between; }
+.title-text h1{ font-size:20px; margin:0; color:var(--text-main); letter-spacing:0.6px; font-weight:700 }
+.title-text p{ margin:2px 0 0 0; color:var(--muted); font-size:12px }
+.title-icon { width:40px; height:40px; display:flex; align-items:center; justify-content:center; border-radius:8px; background:linear-gradient(120deg,var(--accent-1), var(--accent-2)); box-shadow:0 6px 18px rgba(138,92,246,0.14); }
 
-.metric-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 10px;
-  color: #909399;
-}
-.metric-label { font-size: 11px; font-weight: 600; text-transform: uppercase; flex: 1; }
+.status-bar { display:flex; gap:10px; align-items:center }
+.el-tag { background: linear-gradient(90deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border: 1px solid rgba(255,255,255,0.03); color:var(--text-main); }
+.pulse-tag{ animation: glow 1.6s ease-in-out infinite; border-radius:10px }
+@keyframes glow{ 0%{ box-shadow:0 0 0 0 rgba(139,92,246,0.15) } 50%{ box-shadow:0 0 28px 6px rgba(0,229,255,0.04) } 100%{ box-shadow:0 0 0 0 rgba(139,92,246,0.06) } }
 
-/* 状态小徽章 */
-.metric-badge {
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 8px;
-  font-weight: 600;
-}
-.badge-gray   { background: #f4f4f5; color: #909399; }
-.badge-green  { background: #f0f9eb; color: #67C23A; }
-.badge-orange { background: #fdf6ec; color: #E6A23C; }
-.badge-red    { background: #fef0f0; color: #F56C6C; }
-.badge-blue   { background: #ecf5ff; color: #409EFF; }
+/* overheat banner - sharper and prominent */
+.overheat-alert{ background: linear-gradient(90deg, rgba(245,92,92,0.12), rgba(255,140,92,0.06)); border-left:4px solid #ff6b6b; color:#fff; margin-bottom:14px }
 
-.metric-value-container { display: flex; align-items: baseline; gap: 4px; }
-.metric-value {
-  font-size: 30px;
-  font-weight: 700;
-  color: #303133;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-  transition: color 0.5s;
-}
-.fan-value { color: #303133 !important; }
-.metric-unit { font-size: 14px; color: #909399; }
+/* metrics grid */
+.metrics-grid{ margin-bottom:14px }
+.metric-card{ padding:12px }
+.metric-header{ display:flex; align-items:center; gap:8px; margin-bottom:8px; color:var(--text-secondary) }
+.metric-label{ font-size:11px; font-weight:600; color:var(--text-secondary); text-transform:none }
+.metric-value{ font-size:32px; font-weight:800; color:var(--text-main); transition: color 0.45s }
+.metric-unit{ color:var(--muted); font-size:13px }
+.metric-badge{ font-weight:700; font-size:11px; padding:4px 8px; border-radius:999px }
+.badge-green{ background: linear-gradient(90deg,#0f5132 0%, #154d3f 100%); color:#c7ffd8 }
+.badge-blue{ background: linear-gradient(90deg,#062f4f 0%, #083b67 100%); color:#cfeaff }
 
-.metric-progress { margin: 8px 0 6px; }
+/* progress visual tweaks */
+.metric-progress .el-progress-bar__outer{ background: rgba(255,255,255,0.02); border-radius:10px }
+.metric-progress .el-progress__inner{ border-radius:10px }
 
-/* Sparkline 迷你历史 */
-.metric-trend {
-  display: flex;
-  align-items: flex-end;
-  gap: 2px;
-  height: 20px;
-  margin-top: 4px;
-}
-.spark-bar {
-  flex: 1;
-  min-height: 2px;
-  border-radius: 1px;
-  transition: height 0.3s, background 0.3s;
-  opacity: 0.7;
-}
+/* spark bars - neon accent */
+.metric-trend{ display:flex; gap:4px; height:24px }
+.spark-bar{ border-radius:2px; transition:height 0.35s ease, background 0.35s ease }
 
-/* ===== 快捷模式卡 ===== */
-.quick-card { margin-bottom: 12px; }
-.quick-row {
-  display: flex;
-  gap: 16px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-.quick-block {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 200px;
-}
-.quick-block.stretch { flex: 1; min-width: 260px; }
-.quick-label {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 12px;
-  color: #606266;
-  gap: 4px;
-}
-.quick-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+/* quick card */
+.quick-card{ padding:12px; margin-bottom:14px }
+.quick-row{ display:flex; gap:14px; align-items:center; flex-wrap:wrap }
+.quick-block{ min-width:220px }
+.quick-label{ display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--text-secondary) }
+.el-button--primary{ background: linear-gradient(90deg, var(--accent-1), var(--accent-2)); border:none; box-shadow: 0 8px 28px rgba(139,92,246,0.14); }
+.el-button--success{ background: linear-gradient(90deg,#2ecc71, #66d08f); border:none }
+.el-button{ color:var(--text-main); font-weight:700 }
 
-/* ===== 图表区 ===== */
-.charts-container { margin-bottom: 12px; }
+/* charts */
+.chart-card{ height: calc(50vh - 110px); min-height:240px; padding:8px }
+.chart-header{ display:flex; align-items:center; gap:10px }
+.chart-title{ color:var(--text-main); font-weight:700 }
+.chart-subtitle{ color:var(--text-secondary); font-size:12px }
+.chart-wrapper{ height:100%; position:relative; }
+.chart-wrapper canvas{ width:100% !important; height:100% !important }
 
-.chart-card { height: calc(50vh - 90px); min-height: 220px; }
-:deep(.chart-card .el-card__body) { height: calc(100% - 56px); padding: 10px 14px; }
+/* controls */
+.controls{ display:flex; justify-content:center; gap:12px; align-items:center; padding-top:8px }
+.main-control-btn{ min-width:160px; border-radius:12px; padding:12px 18px }
+.el-divider--vertical{ height:42px }
 
-.chart-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.chart-title { font-size: 14px; font-weight: 600; color: #303133; }
-.chart-subtitle { font-size: 11px; color: #909399; margin: 1px 0 0 0; }
+/* dark-mode tweaks */
+.dark-mode{ background: linear-gradient(180deg,#03040a 0%, #071025 80%) }
+.dark-mode .el-card{ background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border:1px solid rgba(255,255,255,0.04) }
+.dark-mode .title-text h1, .dark-mode .metric-value{ color:var(--text-main) }
+.dark-mode .metric-header, .dark-mode .metric-label, .dark-mode .chart-subtitle, .dark-mode .quick-label{ color:var(--text-secondary) }
 
-.chart-wrapper { height: 100%; position: relative; }
-.chart-wrapper canvas { width: 100% !important; height: 100% !important; }
+/* micro interactions */
+.el-card:hover{ transform: translateY(-4px); transition: transform 0.25s ease }
+.el-button:hover{ transform: translateY(-2px) }
+.spark-bar:hover{ transform: scaleY(1.05); filter:brightness(1.08) }
 
-/* ===== 控制按钮 ===== */
-.controls {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 10px;
-  padding: 4px 0 8px;
-}
-.main-control-btn { min-width: 140px; font-weight: 600; }
+/* responsive adjustments */
+@media (max-width: 980px){ .chart-card{ height:340px } .metric-value{ font-size:24px } .title-text h1{ font-size:16px } }
+
+/* subtle rim lighting for panels */
+.el-card::after{ content:''; position:absolute; inset:0; pointer-events:none; border-radius:12px; box-shadow: inset 0 0 40px rgba(139,92,246,0.02) }
+
+/* small utility */
+.autostart-toggle{ display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border-left:1px solid rgba(255,255,255,0.08) }
+.autostart-label{ font-size:12px; color:var(--text-secondary) }
+
+/* ensure charts and points pop */
+:deep(.chartjs-render-monitor) { border-radius:8px }
+:deep(.chartjs-tooltip) { background: rgba(3,6,12,0.85) }
 </style>

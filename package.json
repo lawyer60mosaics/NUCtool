@@ -1,17 +1,19 @@
 {
   "name": "x15_71fan",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "",
   "main": "index.js",
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
+    "build:datetime": "node build-with-date.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "private": true,
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
+    "@playwright/test": "^1.59.1",
     "@tauri-apps/api": "^2.9.1",
     "@tauri-apps/plugin-autostart": "^2.5.1",
     "@tauri-apps/plugin-dialog": "^2.6.0",

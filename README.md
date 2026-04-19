@@ -1,102 +1,226 @@
-![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/cyear/NUCtool/total?style=for-the-badge)
-![GitHub Issues or Pull Requests](https://img.shields.io/github/issues/cyear/NUCtool?style=for-the-badge)
-![GitHub Issues or Pull Requests](https://img.shields.io/github/issues-closed/cyear/NUCtool?style=for-the-badge)
-![GitHub last commit](https://img.shields.io/github/last-commit/cyear/NUCtool?style=for-the-badge)
-![GitHub top language](https://img.shields.io/github/languages/top/cyear/NUCtool?style=for-the-badge)
-![GitHub License](https://img.shields.io/github/license/cyear/NUCtool?style=for-the-badge)
-![GitHub repo size](https://img.shields.io/github/repo-size/cyear/NUCtool?style=for-the-badge)
-![GitHub Repo stars](https://img.shields.io/github/stars/cyear/NUCtool?style=for-the-badge)
-![GitHub Release](https://img.shields.io/github/v/release/cyear/NUCtool?style=for-the-badge)
-![GitHub commits since latest release](https://img.shields.io/github/commits-since/cyear/NUCtool/latest?style=for-the-badge)
+# NUC X15 风扇策略需求 Plan
 
-# NUCtool
+> **设计原则：安静优先 + 散热托底**
+> 版本：v1.0 | 状态：草稿
 
-> Intel NUC X15 系列工具用于 LAPAC71H, LAPKC71F 等机型
+---
 
-> [!NOTE]
-> NUCtool v1.0-Beta 正在进行中...(更改调用方法)
+## 一、现有风扇策略痛点分析
+
+### 问题清单
+
+| 类别 | 问题描述 | 严重程度 |
+|------|----------|----------|
+| 噪音 | 低负载时风扇转速仍居高不下，日常使用噪音过大 | 🔴 高 |
+| 噪音 | 风扇转速变化跳跃式，频繁波动造成明显噪音感知 | 🔴 高 |
+| 温度 | 高负载场景下散热响应滞后，CPU/GPU 短时过热 | 🟠 中 |
+| 温度 | 多核满载时缺少 CPU + GPU 联动散热策略 | 🟠 中 |
+| 体验 | 无法根据使用场景（游戏/办公/睡眠）自动切换策略 | 🔵 低 |
+| 体验 | 缺少用户自定义曲线入口，厂商预设不灵活 | 🔵 低 |
+
+### 问题优先级
+
+```
+噪音问题 > 温控问题 > 灵活性问题
+```
+
+### 根本原因分析
+
+现有策略的核心缺陷是**缺乏滞后迟滞（Hysteresis）机制**，导致温度在边界附近震荡时风扇转速反复抖动，是噪音主诉的根本原因。
+
+---
+
+## 二、工作模式定义
+
+| 模式 | 触发条件 | CPU 风扇上限 | GPU 风扇上限 | 优先级 |
+|------|----------|-------------|-------------|--------|
+| 🌙 静音模式 | 手动选择 / 深夜时段 | 35% | 30% | 噪音 < 温度 |
+| ☁️ 办公模式 | CPU < 40% 持续 3min | 55% | 45% | 平衡 |
+| 🎮 游戏模式 | GPU 利用率 > 60% | 80% | 90% | 温度 < 噪音 |
+| 🔥 性能模式 | 手动选择 / 满载渲染 | 100% | 100% | 温度优先 |
+| 🛠️ 自定义模式 | 用户手动配置 | 用户设定 | 用户设定 | 用户定义 |
+
+### 模式切换逻辑
+
+```
+开机默认 → 办公模式
+  ├─ GPU 利用率 > 60% → 游戏模式
+  ├─ CPU < 40% 持续 3min → 办公模式
+  ├─ 用户手动切换 → 对应模式
+  └─ 满载保护触发 → 风扇不受模式限制，强制全速
+```
+
+---
+
+## 三、温控曲线参数需求
+
+### 通用参数说明
+
+| 参数 | 说明 | 作用 |
+|------|------|------|
+| 启动温度阈值 | 风扇开始随温度升速的起点 | 决定低负载时的噪音基线 |
+| 斜率控制区间 | 线性升速的温度区间 | 控制响应平滑度 |
+| 满速触发温度 | 达到此温度后风扇跑满 | 散热保护上限 |
+| 风速变化步长 | 每秒最大转速变化量 | 防止转速突变 |
+| 滞后迟滞带宽 | 降温后风扇延迟降速的温度差 | 消除转速抖动 |
+
+### 各模式推荐参数
+
+#### 🌙 静音模式
+
+| 参数 | CPU 风扇 | GPU 风扇 |
+|------|----------|----------|
+| 启动温度阈值 | 50°C | 48°C |
+| 斜率控制区间 | 50–75°C | 48–70°C |
+| 满速触发温度 | 90°C | 85°C |
+| 风速变化步长 | 2%/s | 2%/s |
+| 滞后迟滞带宽 | 8°C | 8°C |
+
+#### ☁️ 办公模式
+
+| 参数 | CPU 风扇 | GPU 风扇 |
+|------|----------|----------|
+| 启动温度阈值 | 45°C | 43°C |
+| 斜率控制区间 | 45–70°C | 43–65°C |
+| 满速触发温度 | 85°C | 82°C |
+| 风速变化步长 | 3%/s | 3%/s |
+| 滞后迟滞带宽 | 5°C | 5°C |
+
+#### 🎮 游戏模式
+
+| 参数 | CPU 风扇 | GPU 风扇 |
+|------|----------|----------|
+| 启动温度阈值 | 40°C | 38°C |
+| 斜率控制区间 | 40–75°C | 38–70°C |
+| 满速触发温度 | 85°C | 83°C |
+| 风速变化步长 | 5%/s | 5%/s |
+| 滞后迟滞带宽 | 3°C | 3°C |
+
+#### 🔥 性能模式
+
+| 参数 | CPU 风扇 | GPU 风扇 |
+|------|----------|----------|
+| 启动温度阈值 | 35°C | 35°C |
+| 斜率控制区间 | 35–70°C | 35–65°C |
+| 满速触发温度 | 80°C | 78°C |
+| 风速变化步长 | 8%/s | 8%/s |
+| 滞后迟滞带宽 | 2°C | 2°C |
+
+> **💡 关键设计说明**
 >
-> 交流群以及及时反馈: https://discord.gg/8geBWer34C
+> 滞后迟滞带宽是降低风扇频繁波动的关键参数。当温度在 80–85°C 区间震荡时，迟滞带保证风扇不反复切换档位。建议从 5°C 开始测试，如仍有抖动则适当增大。
 
-> [!NOTE]
-> 随缘更新, 如果觉得有用请给个⭐
->
-> [English Document](./assets/README_English.md)
->
-> [详细更新说明](./assets/NUCtoolChange.md)
->
-> 这里有话说了:
-> 
-> 你: 主播主播有没有比这个还好用的软件
->
-> 主播: 兄弟有的有的, 这种软件还有两种
->
-> [机械革命控制台 windows](http://mechrevo.com/)/[tuxedo-control-center Linux](https://github.com/tuxedocomputers/tuxedo-control-center)
+---
 
-> [!WARNING]
-> 有损坏硬件风险, 使用此程序即认为接受风险, 出现问题概不负责
->
-> 本程序可能有严重缺陷, 请在保障安全情况下使用此程序
->
-> 反馈前请看 [必要说明](assets/分析.md)
+## 四、功能性需求清单
 
-| Windows/Linux 支持 |   LAPAC71H    |  LAPKC71F   |
-|:------------:|:-------------:|:-----------:|
-|   风扇控制    |      ✓ ✓      |     ✓ ☐     |
-|   异常恢复    |      ✓ ✓      |     ✓ ☐     |
-|    CPU L1    |      ✓ ✓      |     ☐ ☐     |
-|    CPU L2    |      ✓ ✓      |     ☐ ☐     |
-|    GPU L1    |      ✓ ✓      |     ✕ ✕     |
-|    GPU L2    |      ✓ ✓      |     ✕ ✕     |
-|   GPU MAX    |    100 85     |     ✕ ✕     |
-|    温度墙     |      ✓ ?      |     ☐ ?     |
-|  键盘彩色LED  |      ✓ ?       |     ☐ ?      |
-| 键盘自定义LED |      * ?      |     * ?     |
-|   自动更新    |      ✓ ✓      |     ✓ ✓     |
-|   开机自启    |      ✓ ☐      |     ✓ ☐     |
+### 4.1 风扇控制逻辑（FC）
 
-`✓`: 支持 `✕`: 不支持 
+| ID | 需求描述 | 优先级 |
+|----|----------|--------|
+| FC-01 | CPU 风扇与 GPU 风扇独立控制，支持分别配置曲线 | **Must** |
+| FC-02 | 温度采样周期 ≤ 1s，控制响应延迟 ≤ 500ms | **Must** |
+| FC-03 | 支持迟滞（Hysteresis）机制，避免转速抖动 | **Must** |
+| FC-04 | 满载状态下强制进入保护模式，风扇不受模式限制 | **Must** |
+| FC-05 | 联动模式：当 GPU 过热时自动提升 CPU 风扇协同散热 | Should |
+| FC-06 | 支持 RPM 直接控制模式（替代百分比控制） | Nice |
 
-`☐`: 未测试 `*`: 等待更新 
+### 4.2 模式管理（MM）
 
-`?`: 也许支持但没必要支持
+| ID | 需求描述 | 优先级 |
+|----|----------|--------|
+| MM-01 | 预设 4 种内置模式（静音/办公/游戏/性能），开机可选 | **Must** |
+| MM-02 | 支持基于时间段的自动模式切换（如夜间自动静音） | Should |
+| MM-03 | 支持基于应用进程的自动模式切换（如启动游戏切游戏模式） | Nice |
+| MM-04 | 模式切换时平滑过渡，禁止转速跳变 | Should |
 
-> [!WARNING]
-> 有损坏硬件风险, 使用此程序即认为接受风险, 出现问题概不负责
->
-> 平台支持
->
-> 1. Windows 11 / Windows 10(依赖webview2)
-> 2. Linux(依赖make)
->
-> Windows 使用教程(支持功能以实际为准)
-> 1. 首次使用需`调整风扇曲线`并点击`保存配置`
-> 2. 配置路径: `%AppData%\com.nuc.x15.fan.cyear.app`
->
-> Linux 使用教程(支持功能以实际为准)
-> 1. 内核要求>=6.13(或>=6.10)
-> 2. 请看下方 Linux 必要步骤，使用同Windows(2-3)
+### 4.3 用户界面（UI）
 
-> [!CAUTION]
-> Linux 必要步骤
-> ```shell
-> # 内核版本>=6.13 执行
-> git clone https://github.com/cyear/uniwill-laptop --branch kernel-6.13
-> # 内核版本>=6.10 执行
-> git clone https://github.com/cyear/uniwill-laptop
-> # 以下均可执行
-> cd uniwill-laptop
-> # 编译安装加载
-> sudo sh u.sh
-> # 如出现严重问题，请立刻断电或者卸载模块(请不要改为开机自动加载)
-> ```
+| ID | 需求描述 | 优先级 |
+|----|----------|--------|
+| UI-01 | 提供系统托盘图标，实时显示当前模式和温度 | **Must** |
+| UI-02 | 曲线编辑器支持拖拽调节控制点（可视化曲线） | Should |
+| UI-03 | 提供历史温度和转速趋势图（最近 1h） | Nice |
+| UI-04 | 支持配置文件导入/导出 | Should |
 
-#### Star History
+### 优先级说明
 
-[![Star History Chart](https://api.star-history.com/svg?repos=cyear/NUCtool&type=Timeline)](https://star-history.com/#cyear/NUCtool&Timeline)
+- **Must**：MVP 必须实现，缺少则不可发布
+- **Should**：应在正式版本中实现
+- **Nice**：锦上添花，可在迭代版本中实现
 
-#### Thank
+---
 
-> 致谢 [Carey Evans(Rust)](https://users.rust-lang.org/u/carey/summary) 大佬
-> 
-> 致谢 [Wer-Wolf(uniwill-laptop)](https://github.com/Wer-Wolf/uniwill-laptop) 大佬
+## 五、非功能性需求
+
+| 类别 | 需求 |
+|------|------|
+| 性能 | 策略程序 CPU 占用率 < 1%，内存占用 < 50MB |
+| 稳定性 | 7×24h 运行无崩溃，异常时回退到默认策略 |
+| 兼容性 | 支持 Windows 11，可选支持 Linux（Ubuntu 22.04+） |
+| 安全性 | 写入 EC 寄存器前校验参数范围，防止硬件损坏 |
+| 可维护性 | 配置文件使用 JSON/TOML 格式，人类可读 |
+
+---
+
+## 六、实现路径建议
+
+### 方案 A：软件层（推荐入门）
+
+使用 **Fan Control**（Windows 开源工具）配置自定义曲线：
+
+1. 下载并安装 [Fan Control](https://github.com/Rem0o/FanControl.Releases)
+2. 识别 NUC X15 的风扇控制器（通常为 IT8792E 或类似 EC 芯片）
+3. 按各模式参数配置温度-转速曲线
+4. 利用 Fan Control 的 Mix 功能实现 CPU + GPU 联动控制
+
+**优点**：无需 BIOS 修改，风险低，可视化配置
+**缺点**：依赖 Windows 运行环境，深度有限
+
+### 方案 B：BIOS/EC 层（高级）
+
+通过修改 BIOS 中的 EC 固件配置风扇曲线：
+
+1. 使用 ITE EC Flash Tool 读取当前 EC 固件
+2. 分析温控表结构（通常为 8 点温度-占空比映射表）
+3. 修改对应字节并写回
+
+**优点**：系统级生效，Linux/Windows 通用
+**缺点**：有一定风险，需备份原始固件
+
+---
+
+## 七、交付里程碑
+
+| 阶段 | 里程碑 | 交付物 |
+|------|--------|--------|
+| 1 | 需求确认 & 基线测试 | 当前策略温度/噪音基线数据报告 |
+| 2 | 曲线参数设计 & 仿真验证 | 5 种模式参数配置表 + 验证记录 |
+| 3 | MVP 实现（Must 需求） | FC-01~04、MM-01、UI-01 可运行版本 |
+| 4 | 用户验收测试 | 噪音 dB & 峰值温度对比报告 |
+| 5 | Should/Nice 功能迭代 | 完整功能版本 |
+
+### 验收标准
+
+- 静音模式下，空载噪音较现状降低 **≥ 5dB**
+- 游戏模式下，CPU/GPU 峰值温度 **≤ 90°C**
+- 模式切换时，转速变化平滑，无瞬间跳变（视觉可感知）
+- 连续运行 72h 无异常重启或崩溃
+
+---
+
+## 八、测试计划
+
+### 测试场景
+
+| 场景 | 工具 | 指标 |
+|------|------|------|
+| 空载静音测试 | HWiNFO64 + 分贝仪 | 噪音 dB、待机温度 |
+| 办公负载测试 | Cinebench R23 单核 | 转速稳定性、响应时间 |
+| 游戏负载测试 | 3DMark + 实际游戏 | GPU 峰值温度、风扇 RPM |
+| 满载压力测试 | AIDA64 全项压力测试 | CPU/GPU 峰值温度、保护触发 |
+| 转速抖动测试 | HWiNFO 趋势图 | 温度边界处转速波动幅度 |
+
+---
+
+*文档维护：根据实测数据持续更新参数推荐值*

@@ -3,3 +3,8 @@ pub mod setup;
 pub mod config;
 pub mod fan;
 pub mod tdp;
+pub mod constants;
+pub mod models;
+pub mod fan_curve;
+pub mod ramp;
+pub mod mode_profiles;

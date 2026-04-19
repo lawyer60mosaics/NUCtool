@@ -1,15 +1,9 @@
-#[cfg(all(test, windows))]
-use crate::win_plug::{
-    wmi::wmi_security,
-};
-#[cfg(test)]
-use std::{
-    thread::sleep,
-    time::Duration,
-    env
-};
 #[cfg(test)]
 use crate::plug::struct_set::ApiFan;
+#[cfg(all(test, windows))]
+use crate::win_plug::wmi::wmi_security;
+#[cfg(test)]
+use std::{env, thread::sleep, time::Duration};
 
 #[test]
 fn test_api_fan() {
@@ -61,17 +55,21 @@ fn led_color() {
     api.set_ac_led_color_y();
     sleep(Duration::from_secs(3));
     assert_eq!(api.get_ac_led_color(), 2);
-    
+
     api.set_ac_led_color_n();
     sleep(Duration::from_secs(3));
     assert_eq!(api.get_ac_led_color(), 1);
-    
 }
 
 // ── 纯逻辑测试（无需硬件，可直接 cargo test） ──────────────────────────────
 
 #[cfg(test)]
-use crate::plug::fan::{speed_handle, ramp_speed};
+use crate::plug::{
+    config::{default_fan_data, normalize_fan_data},
+    fan_curve::speed_handle,
+    ramp::ramp_speed,
+    struct_set::{FanData, FanPoint},
+};
 
 /// 问题2：插值结果必须夹紧到 [0, 100]
 #[test]
@@ -115,7 +113,7 @@ fn test_fan_set_mapping_bounds() {
     assert_eq!((100i64 * 2).clamp(0, 200), 200);
     assert_eq!((0i64 * 2).clamp(0, 200), 0);
     assert_eq!((110i64 * 2).clamp(0, 200), 200); // 越界被夹到最大值
-    // Linux 100% → 255
+                                                 // Linux 100% → 255
     let lv = ((2.55 * 100f64) as i64).clamp(0, 255);
     assert_eq!(if lv >= 254 { 255 } else { lv }, 255);
     // Linux 99% → 252，不触发强制拉满
@@ -163,12 +161,86 @@ fn test_wmi_format_string_length() {
 #[test]
 fn test_fan_speeds_filter() {
     // 有效范围内的值应原样保留
-    assert!(1i64 <= 50 && 50 <= 105);   // 50°C 正常
+    assert!(1i64 <= 50 && 50 <= 105); // 50°C 正常
     assert!((0i64..=7000).contains(&3500)); // 3500 RPM 正常
 
     // 边界值验证
-    assert!(!(1i64..=105).contains(&0));   // 0°C 被过滤
-    assert!(!(1i64..=105).contains(&-1));  // 负数被过滤
+    assert!(!(1i64..=105).contains(&0)); // 0°C 被过滤
+    assert!(!(1i64..=105).contains(&-1)); // 负数被过滤
     assert!(!(1i64..=105).contains(&106)); // 超温被过滤
     assert!(!(0i64..=7000).contains(&7001)); // 超转速被过滤
+}
+
+#[test]
+fn test_default_fan_data_has_valid_curve() {
+    let d = default_fan_data();
+    assert!(!d.left_fan.is_empty());
+    assert!(!d.right_fan.is_empty());
+    assert_eq!(d.control.strategy, "independent");
+    assert!(d.monitor.sample_interval_ms >= 500);
+}
+
+#[test]
+fn test_normalize_fan_data_clamps_values() {
+    let bad = FanData {
+        left_fan: vec![FanPoint {
+            temperature: -10,
+            speed: 999,
+        }],
+        right_fan: vec![FanPoint {
+            temperature: 999,
+            speed: -20,
+        }],
+        control: crate::plug::struct_set::FanControlPolicy {
+            strategy: "invalid".to_string(),
+            preset: "invalid".to_string(),
+            ramp_up_step: -1,
+            ramp_down_step: 99,
+            min_speed: 99,
+            zero_rpm_enabled: true,
+            zero_rpm_threshold: 999,
+            ..Default::default()
+        },
+        alerts: crate::plug::struct_set::AlertConfig {
+            cpu: crate::plug::struct_set::SensorAlertRule {
+                threshold: -5,
+                actions: crate::plug::struct_set::AlertActions {
+                    popup: true,
+                    sound: false,
+                    log: true,
+                    force_shutdown: false,
+                    confirm_times: 0,
+                },
+            },
+            gpu: crate::plug::struct_set::SensorAlertRule {
+                threshold: 500,
+                actions: crate::plug::struct_set::AlertActions {
+                    popup: true,
+                    sound: false,
+                    log: true,
+                    force_shutdown: false,
+                    confirm_times: 999,
+                },
+            },
+            recover_delta: 999,
+        },
+        monitor: crate::plug::struct_set::MonitoringConfig {
+            sample_interval_ms: 10,
+            log_enabled: true,
+        },
+    };
+
+    let n = normalize_fan_data(bad);
+    assert_eq!(n.control.strategy, "independent");
+    assert_eq!(n.control.preset, "standard");
+    assert!(n.control.ramp_up_step >= 1 && n.control.ramp_up_step <= 40);
+    assert!(n.control.ramp_down_step >= 1 && n.control.ramp_down_step <= 30);
+    assert!(n.control.min_speed <= 60);
+    assert!(n.alerts.cpu.threshold >= 50);
+    assert!(n.alerts.gpu.threshold <= 110);
+    assert!(n.alerts.cpu.actions.confirm_times >= 1);
+    assert!(n.alerts.gpu.actions.confirm_times <= 10);
+    assert!(n.monitor.sample_interval_ms >= 500 && n.monitor.sample_interval_ms <= 1000);
+    assert!(n.left_fan[0].temperature >= 1 && n.left_fan[0].temperature <= 110);
+    assert!(n.left_fan[0].speed >= 0 && n.left_fan[0].speed <= 100);
 }

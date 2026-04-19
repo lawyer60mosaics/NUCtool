@@ -8,7 +8,9 @@
         "width": 930,
         "height": 580,
         "visible": true,
-        "transparent": true
+        "transparent": false,
+        "backgroundColor": "#05060a",
+        "url": "/index.html"
       },
       {
         "label": "splashscreen",

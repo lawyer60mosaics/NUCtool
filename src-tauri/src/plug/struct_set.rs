@@ -1,27 +1,30 @@
-#[cfg(unix)]
-use std::path::PathBuf;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use std::sync::{
-    {Arc, Mutex},
+#[cfg(unix)]
+use std::path::PathBuf;
+
+use crate::plug::constants::{
+    DEFAULT_ALERT_CONFIRM_TIMES, DEFAULT_CPU_ALERT_THRESHOLD, DEFAULT_CPU_FAN_MAX_PERCENT,
+    DEFAULT_CPU_HYSTERESIS_BANDWIDTH, DEFAULT_GPU_ALERT_THRESHOLD, DEFAULT_GPU_FAN_MAX_PERCENT,
+    DEFAULT_GPU_HYSTERESIS_BANDWIDTH, DEFAULT_GPU_LINKAGE_BOOST, DEFAULT_GPU_LINKAGE_THRESHOLD,
+    DEFAULT_MODE, DEFAULT_MONITOR_SAMPLE_INTERVAL_MS, DEFAULT_RAMP_DOWN_STEP, DEFAULT_RAMP_UP_STEP,
+    DEFAULT_ZERO_RPM_THRESHOLD, MAX_MONITOR_SAMPLE_INTERVAL_MS, MIN_FAN_SPEED,
+    MIN_MONITOR_SAMPLE_INTERVAL_MS,
 };
+#[cfg(windows)]
+use crate::win_plug::wmi::{get_model, wmi_init, wmi_set};
+#[cfg(unix)]
+use crate::{
+    linux_plug::sysfs::{get_kernel_version, get_model_id, get_sys, set_sys},
+    plug::config::find_hwmon_with_name,
+};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 #[cfg(windows)]
-use crate::win_plug::wmi::{
-    wmi_init, wmi_set, get_model
-};
-#[cfg(windows)]
 use windows::{
     core::BSTR,
-    Win32::System::Wmi::{
-        IWbemClassObject, IWbemServices
-    }
-};
-#[cfg(unix)]
-use crate::{
-    linux_plug::sysfs::{get_sys, set_sys, get_kernel_version, get_model_id},
-    plug::config::find_hwmon_with_name
+    Win32::System::Wmi::{IWbemClassObject, IWbemServices},
 };
 
 pub static R_TDP_GPU1: &str = "0x000001000000072d";
@@ -72,16 +75,317 @@ lazy_static! {
     pub static ref HW_ACCESS_LOCK: Mutex<()> = Mutex::new(());
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FanPoint {
     pub temperature: i32,
     pub speed: i32,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FanControlMode {
+    Silent,
+    Office,
+    Gaming,
+    Performance,
+    Custom,
+}
+
+impl FanControlMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FanControlMode::Silent => "silent",
+            FanControlMode::Office => "office",
+            FanControlMode::Gaming => "gaming",
+            FanControlMode::Performance => "performance",
+            FanControlMode::Custom => "custom",
+        }
+    }
+
+    pub fn from_text(value: &str) -> Self {
+        match value.trim().to_lowercase().as_str() {
+            "silent" => FanControlMode::Silent,
+            "office" | "standard" | "balanced" => FanControlMode::Office,
+            "gaming" | "game" => FanControlMode::Gaming,
+            "performance" | "fullspeed" => FanControlMode::Performance,
+            "custom" => FanControlMode::Custom,
+            _ => FanControlMode::Office,
+        }
+    }
+}
+
+impl Default for FanControlMode {
+    fn default() -> Self {
+        FanControlMode::from_text(DEFAULT_MODE)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FanControlPolicy {
+    #[serde(default)]
+    pub mode: FanControlMode,
+    #[serde(default = "default_strategy")]
+    pub strategy: String,
+    #[serde(default = "default_preset")]
+    pub preset: String,
+    #[serde(default = "default_control_mode")]
+    pub control_mode: String,
+    #[serde(default = "default_ramp_up_step")]
+    pub ramp_up_step: i64,
+    #[serde(default = "default_ramp_down_step")]
+    pub ramp_down_step: i64,
+    #[serde(default = "default_min_speed")]
+    pub min_speed: i64,
+    #[serde(default)]
+    pub zero_rpm_enabled: bool,
+    #[serde(default = "default_zero_rpm_threshold")]
+    pub zero_rpm_threshold: i64,
+    #[serde(default)]
+    pub constant_speed_enabled: bool,
+    #[serde(default = "default_constant_speed")]
+    pub constant_speed: i64,
+    #[serde(default = "default_cpu_hysteresis_bandwidth")]
+    pub cpu_hysteresis_bandwidth: i64,
+    #[serde(default = "default_gpu_hysteresis_bandwidth")]
+    pub gpu_hysteresis_bandwidth: i64,
+    #[serde(default = "default_cpu_fan_max_percent")]
+    pub cpu_fan_max_percent: i64,
+    #[serde(default = "default_gpu_fan_max_percent")]
+    pub gpu_fan_max_percent: i64,
+    #[serde(default = "default_true")]
+    pub gpu_linkage_enabled: bool,
+    #[serde(default = "default_gpu_linkage_threshold")]
+    pub gpu_linkage_threshold: i64,
+    #[serde(default = "default_gpu_linkage_boost")]
+    pub gpu_linkage_boost: i64,
+}
+
+impl Default for FanControlPolicy {
+    fn default() -> Self {
+        Self {
+            mode: FanControlMode::default(),
+            strategy: default_strategy(),
+            preset: default_preset(),
+            control_mode: default_control_mode(),
+            ramp_up_step: default_ramp_up_step(),
+            ramp_down_step: default_ramp_down_step(),
+            min_speed: default_min_speed(),
+            zero_rpm_enabled: false,
+            zero_rpm_threshold: default_zero_rpm_threshold(),
+            constant_speed_enabled: false,
+            constant_speed: default_constant_speed(),
+            cpu_hysteresis_bandwidth: default_cpu_hysteresis_bandwidth(),
+            gpu_hysteresis_bandwidth: default_gpu_hysteresis_bandwidth(),
+            cpu_fan_max_percent: default_cpu_fan_max_percent(),
+            gpu_fan_max_percent: default_gpu_fan_max_percent(),
+            gpu_linkage_enabled: default_true(),
+            gpu_linkage_threshold: default_gpu_linkage_threshold(),
+            gpu_linkage_boost: default_gpu_linkage_boost(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AlertActions {
+    #[serde(default = "default_true")]
+    pub popup: bool,
+    #[serde(default)]
+    pub sound: bool,
+    #[serde(default = "default_true")]
+    pub log: bool,
+    #[serde(default)]
+    pub force_shutdown: bool,
+    #[serde(default = "default_alert_confirm_times")]
+    pub confirm_times: u32,
+}
+
+impl Default for AlertActions {
+    fn default() -> Self {
+        Self {
+            popup: true,
+            sound: false,
+            log: true,
+            force_shutdown: false,
+            confirm_times: default_alert_confirm_times(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SensorAlertRule {
+    #[serde(default = "default_cpu_alert_threshold")]
+    pub threshold: i64,
+    #[serde(default)]
+    pub actions: AlertActions,
+}
+
+impl Default for SensorAlertRule {
+    fn default() -> Self {
+        Self {
+            threshold: default_cpu_alert_threshold(),
+            actions: AlertActions::default(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AlertConfig {
+    #[serde(default = "default_cpu_alert_rule")]
+    pub cpu: SensorAlertRule,
+    #[serde(default = "default_gpu_alert_rule")]
+    pub gpu: SensorAlertRule,
+    #[serde(default = "default_recover_delta")]
+    pub recover_delta: i64,
+}
+
+impl Default for AlertConfig {
+    fn default() -> Self {
+        Self {
+            cpu: default_cpu_alert_rule(),
+            gpu: default_gpu_alert_rule(),
+            recover_delta: default_recover_delta(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct MonitoringConfig {
+    #[serde(default = "default_monitor_sample_interval_ms")]
+    pub sample_interval_ms: u64,
+    #[serde(default)]
+    pub log_enabled: bool,
+}
+
+impl Default for MonitoringConfig {
+    fn default() -> Self {
+        Self {
+            sample_interval_ms: default_monitor_sample_interval_ms(),
+            log_enabled: false,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FanData {
+    #[serde(default)]
     pub left_fan: Vec<FanPoint>,
+    #[serde(default)]
     pub right_fan: Vec<FanPoint>,
+    #[serde(default)]
+    pub control: FanControlPolicy,
+    #[serde(default)]
+    pub alerts: AlertConfig,
+    #[serde(default)]
+    pub monitor: MonitoringConfig,
+}
+
+impl Default for FanData {
+    fn default() -> Self {
+        Self {
+            left_fan: vec![],
+            right_fan: vec![],
+            control: FanControlPolicy::default(),
+            alerts: AlertConfig::default(),
+            monitor: MonitoringConfig::default(),
+        }
+    }
+}
+
+fn default_strategy() -> String {
+    "independent".to_string()
+}
+
+fn default_preset() -> String {
+    "custom".to_string()
+}
+
+fn default_control_mode() -> String {
+    "curve".to_string()
+}
+
+fn default_ramp_up_step() -> i64 {
+    DEFAULT_RAMP_UP_STEP
+}
+
+fn default_ramp_down_step() -> i64 {
+    DEFAULT_RAMP_DOWN_STEP
+}
+
+fn default_min_speed() -> i64 {
+    MIN_FAN_SPEED
+}
+
+fn default_zero_rpm_threshold() -> i64 {
+    DEFAULT_ZERO_RPM_THRESHOLD
+}
+
+fn default_constant_speed() -> i64 {
+    50
+}
+
+fn default_cpu_hysteresis_bandwidth() -> i64 {
+    DEFAULT_CPU_HYSTERESIS_BANDWIDTH
+}
+
+fn default_gpu_hysteresis_bandwidth() -> i64 {
+    DEFAULT_GPU_HYSTERESIS_BANDWIDTH
+}
+
+fn default_cpu_fan_max_percent() -> i64 {
+    DEFAULT_CPU_FAN_MAX_PERCENT
+}
+
+fn default_gpu_fan_max_percent() -> i64 {
+    DEFAULT_GPU_FAN_MAX_PERCENT
+}
+
+fn default_gpu_linkage_threshold() -> i64 {
+    DEFAULT_GPU_LINKAGE_THRESHOLD
+}
+
+fn default_gpu_linkage_boost() -> i64 {
+    DEFAULT_GPU_LINKAGE_BOOST
+}
+
+fn default_cpu_alert_threshold() -> i64 {
+    DEFAULT_CPU_ALERT_THRESHOLD
+}
+
+fn default_gpu_alert_threshold() -> i64 {
+    DEFAULT_GPU_ALERT_THRESHOLD
+}
+
+fn default_alert_confirm_times() -> u32 {
+    DEFAULT_ALERT_CONFIRM_TIMES
+}
+
+fn default_cpu_alert_rule() -> SensorAlertRule {
+    SensorAlertRule {
+        threshold: default_cpu_alert_threshold(),
+        actions: AlertActions::default(),
+    }
+}
+
+fn default_gpu_alert_rule() -> SensorAlertRule {
+    SensorAlertRule {
+        threshold: default_gpu_alert_threshold(),
+        actions: AlertActions::default(),
+    }
+}
+
+fn default_recover_delta() -> i64 {
+    3
+}
+
+fn default_monitor_sample_interval_ms() -> u64 {
+    DEFAULT_MONITOR_SAMPLE_INTERVAL_MS.clamp(
+        MIN_MONITOR_SAMPLE_INTERVAL_MS,
+        MAX_MONITOR_SAMPLE_INTERVAL_MS,
+    )
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -105,11 +409,12 @@ pub struct TDP {
 pub struct RGB {
     pub(crate) r: i64,
     pub(crate) g: i64,
-    pub(crate) b: i64
+    pub(crate) b: i64,
 }
 
 pub struct FanControlState {
     pub is_running: Arc<Mutex<bool>>,
+    pub active_mode: Arc<Mutex<String>>,
 }
 
 #[cfg(windows)]
@@ -134,24 +439,68 @@ impl ApiFan {
             (R_FAN_R1, R_FAN_R2, R_FAN_L1, R_FAN_L2)
         };
         ApiFan {
-            in_cls, svc, obj_path, method_name,
-            r_fan_l1, r_fan_l2, r_fan_r1, r_fan_r2,
+            in_cls,
+            svc,
+            obj_path,
+            method_name,
+            r_fan_l1,
+            r_fan_l2,
+            r_fan_r1,
+            r_fan_r2,
         }
     }
     pub fn get_cpu_temp(&self) -> i64 {
         // 与 GPU 保持一致，取低 8 位才是摄氏度温度值，避免高位脏数据触发过温保护
-        wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, R_TEMP_L) & 0xFF
+        wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            R_TEMP_L,
+        ) & 0xFF
     }
     pub fn get_gpu_temp(&self) -> i64 {
-        wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, R_TEMP_R) & 0xFF
+        wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            R_TEMP_R,
+        ) & 0xFF
     }
     pub fn get_fan_l(&self) -> i64 {
-        (wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, &self.r_fan_l1) & 0xFF) << 8 |
-            wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, &self.r_fan_l2)
+        (wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            &self.r_fan_l1,
+        ) & 0xFF)
+            << 8
+            | wmi_set(
+                &self.in_cls,
+                &self.svc,
+                &self.obj_path,
+                &self.method_name,
+                &self.r_fan_l2,
+            )
     }
     pub fn get_fan_r(&self) -> i64 {
-        (wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, &self.r_fan_r1) & 0xFF) << 8 |
-            wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, &self.r_fan_r2)
+        (wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            &self.r_fan_r1,
+        ) & 0xFF)
+            << 8
+            | wmi_set(
+                &self.in_cls,
+                &self.svc,
+                &self.obj_path,
+                &self.method_name,
+                &self.r_fan_r2,
+            )
     }
     fn _set_fan(&self, l: i64, r: i64) {
         // 序列化写入，防止并发导致的 WMI 错误
@@ -159,105 +508,250 @@ impl ApiFan {
         // l/r 范围 0-200，用 {:02X} 保证2位十六进制（00-C8），超出时 clamp 保护
         let l = l.clamp(0, 200);
         let r = r.clamp(0, 200);
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name,
-            format!("0x0000000000{:02X}1809", l).as_str());
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name,
-            format!("0x0000000000{:02X}1804", r).as_str());
+        let _ = wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            format!("0x0000000000{:02X}1809", l).as_str(),
+        );
+        let _ = wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            format!("0x0000000000{:02X}1804", r).as_str(),
+        );
     }
     /// MAX speed 200
     pub fn set_fan(&self, l: i64, r: i64) -> bool {
-        let _ = if *MODEL_ID == 1 { &self._set_fan(l ,r) } else { &self._set_fan(r, l) };
+        let _ = if *MODEL_ID == 1 {
+            &self._set_fan(l, r)
+        } else {
+            &self._set_fan(r, l)
+        };
         true
     }
     pub fn set_fan_auto(&self) -> bool {
         let _guard = HW_ACCESS_LOCK.lock().unwrap();
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, W_FAN_RESET);
+        let _ = wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            W_FAN_RESET,
+        );
         true
     }
     pub fn set_fan_control(&self) -> bool {
         let _guard = HW_ACCESS_LOCK.lock().unwrap();
         if *MODEL_ID == 1 {
-            wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, W_FAN_AC71H_TURBO);
+            wmi_set(
+                &self.in_cls,
+                &self.svc,
+                &self.obj_path,
+                &self.method_name,
+                W_FAN_AC71H_TURBO,
+            );
         } else {
-            wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, W_FAN_KC71F_TURBO);
+            wmi_set(
+                &self.in_cls,
+                &self.svc,
+                &self.obj_path,
+                &self.method_name,
+                W_FAN_KC71F_TURBO,
+            );
         }
         true
     }
     /// 1 - control, 2 - auto
     pub fn get_fan_mode(&self) -> i64 {
-        let out = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, R_FAN_MODE);
+        let out = wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            R_FAN_MODE,
+        );
         println!("MODE: {}", out);
-        if out <= 0 { return 1 } // 异常不管了
-        if out == 27664 || out == 27648 { 2 } else { 1 }
+        if out <= 0 {
+            return 1;
+        } // 异常不管了
+        if out == 27664 || out == 27648 {
+            2
+        } else {
+            1
+        }
     }
     pub fn get_fan_speeds(&self) -> FanSpeeds {
-        let left_fan  = self.get_fan_l();
+        let left_fan = self.get_fan_l();
         let right_fan = self.get_fan_r();
-        let left_temp  = self.get_cpu_temp();
+        let left_temp = self.get_cpu_temp();
         let right_temp = self.get_gpu_temp();
 
         // 超出合理范围的读数视为硬件异常，归零以避免前端显示乱码
         // 转速上限 7000 RPM，温度上限 105°C
         FanSpeeds {
-            left_fan_speed:  if (0..=7000).contains(&left_fan)  { left_fan  } else { 0 },
-            right_fan_speed: if (0..=7000).contains(&right_fan) { right_fan } else { 0 },
-            left_temp:       if (1..=105).contains(&left_temp)  { left_temp  } else { 0 },
-            right_temp:      if (1..=105).contains(&right_temp) { right_temp } else { 0 },
+            left_fan_speed: if (0..=7000).contains(&left_fan) {
+                left_fan
+            } else {
+                0
+            },
+            right_fan_speed: if (0..=7000).contains(&right_fan) {
+                right_fan
+            } else {
+                0
+            },
+            left_temp: if (1..=105).contains(&left_temp) {
+                left_temp
+            } else {
+                0
+            },
+            right_temp: if (1..=105).contains(&right_temp) {
+                right_temp
+            } else {
+                0
+            },
         }
     }
     /// (gpu1, gpu2, cpu1, cpu2, tcc)
     pub fn get_tdp(&self) -> (i64, i64, i64, i64, i64) {
         (
-            wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, R_TDP_CPU1) & 0xFF,
-            wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, R_TDP_CPU2) & 0xFF,
-            wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, R_TDP_GPU1) & 0xFF,
-            wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, R_TDP_GPU2) & 0xFF,
-            wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, R_TDP_TCC)
+            wmi_set(
+                &self.in_cls,
+                &self.svc,
+                &self.obj_path,
+                &self.method_name,
+                R_TDP_CPU1,
+            ) & 0xFF,
+            wmi_set(
+                &self.in_cls,
+                &self.svc,
+                &self.obj_path,
+                &self.method_name,
+                R_TDP_CPU2,
+            ) & 0xFF,
+            wmi_set(
+                &self.in_cls,
+                &self.svc,
+                &self.obj_path,
+                &self.method_name,
+                R_TDP_GPU1,
+            ) & 0xFF,
+            wmi_set(
+                &self.in_cls,
+                &self.svc,
+                &self.obj_path,
+                &self.method_name,
+                R_TDP_GPU2,
+            ) & 0xFF,
+            wmi_set(
+                &self.in_cls,
+                &self.svc,
+                &self.obj_path,
+                &self.method_name,
+                R_TDP_TCC,
+            ),
         )
     }
     pub fn set_tdp(&self, t: TDP) -> bool {
         let _guard = HW_ACCESS_LOCK.lock().unwrap();
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name,
-            format!("0x0000000000{:02X}0783", t.cpu1).as_str());
+        let _ = wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            format!("0x0000000000{:02X}0783", t.cpu1).as_str(),
+        );
         thread::sleep(Duration::from_secs_f64(0.5));
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name,
-            format!("0x0000000000{:02X}0784", t.cpu2).as_str());
+        let _ = wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            format!("0x0000000000{:02X}0784", t.cpu2).as_str(),
+        );
         thread::sleep(Duration::from_secs_f64(0.5));
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name,
-            format!("0x0000000000{:02X}072d", t.gpu1).as_str());
+        let _ = wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            format!("0x0000000000{:02X}072d", t.gpu1).as_str(),
+        );
         thread::sleep(Duration::from_secs_f64(0.5));
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name,
-            format!("0x0000000000{:02X}072e", t.gpu2).as_str());
+        let _ = wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            format!("0x0000000000{:02X}072e", t.gpu2).as_str(),
+        );
         thread::sleep(Duration::from_secs_f64(0.5));
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name,
-            format!("0x0000000000{:02X}0786", t.tcc).as_str());
+        let _ = wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            format!("0x0000000000{:02X}0786", t.tcc).as_str(),
+        );
         true
     }
     pub fn set_ac_led_color_y(&self) -> bool {
         let _guard = HW_ACCESS_LOCK.lock().unwrap();
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, W_AC_LED_COLOR_Y);
+        let _ = wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            W_AC_LED_COLOR_Y,
+        );
         true
     }
     pub fn set_ac_led_color_n(&self) -> bool {
         let _guard = HW_ACCESS_LOCK.lock().unwrap();
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, W_AC_LED_COLOR_N);
+        let _ = wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            W_AC_LED_COLOR_N,
+        );
         true
     }
     #[allow(dead_code)]
     pub fn set_dc_led_color_y(&self) -> bool {
         let _guard = HW_ACCESS_LOCK.lock().unwrap();
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, W_DC_LED_COLOR_Y);
+        let _ = wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            W_DC_LED_COLOR_Y,
+        );
         true
     }
     #[allow(dead_code)]
     pub fn set_dc_led_color_n(&self) -> bool {
         let _guard = HW_ACCESS_LOCK.lock().unwrap();
-        let _ = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, W_DC_LED_COLOR_N);
+        let _ = wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            W_DC_LED_COLOR_N,
+        );
         true
     }
     /// 0 - Error, 1 - off, 2 - on
     pub fn get_ac_led_color(&self) -> i64 {
-        let out = wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, R_AC_LED_COLOR);
+        let out = wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            R_AC_LED_COLOR,
+        );
         match out & 0xff {
             2 => 1,
             4 => 1,
@@ -266,19 +760,25 @@ impl ApiFan {
             _ => {
                 println!("COLOR AC ERROR: {}", out);
                 0
-            },
+            }
         }
     }
     #[allow(dead_code)]
     pub fn get_dc_led_color(&self) -> i64 {
-        let out =wmi_set(&self.in_cls, &self.svc, &self.obj_path, &self.method_name, R_DC_LED_COLOR); 
+        let out = wmi_set(
+            &self.in_cls,
+            &self.svc,
+            &self.obj_path,
+            &self.method_name,
+            R_DC_LED_COLOR,
+        );
         match out {
             10 => 1,
             64 => 2,
-            _ => { 
+            _ => {
                 println!("COLOR DC ERROR: {}", out);
                 0
-            },
+            }
         }
     }
 }
@@ -302,14 +802,27 @@ pub struct ApiFan {
 impl ApiFan {
     pub fn init() -> Self {
         let (r_fan_l, r_fan_r, w_fan_l, w_fan_r) = if *MODEL_ID == 1 {
-            (DRIVER_PATH.join("fan2_input"), DRIVER_PATH.join("fan1_input"), DRIVER_PATH.join("pwm2"), DRIVER_PATH.join("pwm1"))
+            (
+                DRIVER_PATH.join("fan2_input"),
+                DRIVER_PATH.join("fan1_input"),
+                DRIVER_PATH.join("pwm2"),
+                DRIVER_PATH.join("pwm1"),
+            )
         } else {
-            (DRIVER_PATH.join("fan1_input"), DRIVER_PATH.join("fan2_input"), DRIVER_PATH.join("pwm1"), DRIVER_PATH.join("pwm2"))
+            (
+                DRIVER_PATH.join("fan1_input"),
+                DRIVER_PATH.join("fan2_input"),
+                DRIVER_PATH.join("pwm1"),
+                DRIVER_PATH.join("pwm2"),
+            )
         };
         ApiFan {
             cpu: DRIVER_PATH.join("temp1_input"),
             gpu: DRIVER_PATH.join("temp2_input"),
-            r_fan_l, r_fan_r, w_fan_l, w_fan_r,
+            r_fan_l,
+            r_fan_r,
+            w_fan_l,
+            w_fan_r,
             mode: DRIVER_PATH.join("pwm1_enable"),
             cpu_pl1: DRIVER_PATH.join("power1_input"),
             cpu_pl2: DRIVER_PATH.join("power2_input"),
@@ -353,16 +866,32 @@ impl ApiFan {
         get_sys(&self.mode)
     }
     pub fn get_fan_speeds(&self) -> FanSpeeds {
-        let left_fan  = self.get_fan_l();
+        let left_fan = self.get_fan_l();
         let right_fan = self.get_fan_r();
-        let left_temp  = self.get_cpu_temp();
+        let left_temp = self.get_cpu_temp();
         let right_temp = self.get_gpu_temp();
 
         FanSpeeds {
-            left_fan_speed:  if (0..=7000).contains(&left_fan)  { left_fan  } else { 0 },
-            right_fan_speed: if (0..=7000).contains(&right_fan) { right_fan } else { 0 },
-            left_temp:       if (1..=105).contains(&left_temp)  { left_temp  } else { 0 },
-            right_temp:      if (1..=105).contains(&right_temp) { right_temp } else { 0 },
+            left_fan_speed: if (0..=7000).contains(&left_fan) {
+                left_fan
+            } else {
+                0
+            },
+            right_fan_speed: if (0..=7000).contains(&right_fan) {
+                right_fan
+            } else {
+                0
+            },
+            left_temp: if (1..=105).contains(&left_temp) {
+                left_temp
+            } else {
+                0
+            },
+            right_temp: if (1..=105).contains(&right_temp) {
+                right_temp
+            } else {
+                0
+            },
         }
     }
     pub fn get_tdp(&self) -> (i64, i64, i64, i64, i64) {
@@ -371,7 +900,7 @@ impl ApiFan {
             get_sys(&self.cpu_pl2) / 1000,
             get_sys(&self.gpu_pl1) / 1000,
             get_sys(&self.gpu_pl2) / 1000,
-            0
+            0,
         )
     }
     pub fn set_tdp(&self, t: TDP) -> bool {
